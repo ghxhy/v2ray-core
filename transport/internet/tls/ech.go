@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"sync"
@@ -22,17 +23,30 @@ func ApplyECH(c *Config, config *tls.Config) error {
 	var ECHConfig []byte
 	var err error
 
-	if len(c.EchConfig) > 0 {
-		ECHConfig = c.EchConfig
-	} else { // ECH config > DOH lookup
+	// 如果配置了 DOH 服务器，优先使用它查询
+	if c.Ech_DOHserver != "" {
 		addr := net.ParseAddress(config.ServerName)
 		if !addr.Family().IsDomain() {
 			return newError("Using DOH for ECH needs SNI")
 		}
 		ECHConfig, err = QueryRecord(addr.Domain(), c.Ech_DOHserver)
 		if err != nil {
-			return err
+			newError("failed to query ECH config").AtError().Base(err).WriteToLog()
+			// 如果 DOH 查询失败且配置了 EchConfig，使用 EchConfig
+			if len(c.EchConfig) > 0 {
+				ECHConfig = c.EchConfig
+			} else {
+				// 否则，随便写个默认的，防止发送非ECH的请求导致域名泄露
+				defaultConfigBase64 := "AEX+DQBBeQAgACD1MjcNjv0a5650kAhyhg1IKIs0f5pK21WF976hVq00IwAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+				ECHConfig, err = base64.StdEncoding.DecodeString(defaultConfigBase64)
+				if err != nil {
+					return newError("failed to decode default ECH config").Base(err)
+				}
+			}
 		}
+	} else if len(c.EchConfig) > 0 {
+		// 如果没有配置 DOH 服务器但配置了 EchConfig，直接使用 EchConfig
+		ECHConfig = c.EchConfig
 	}
 
 	config.EncryptedClientHelloConfigList = ECHConfig
@@ -126,8 +140,17 @@ func dohQuery(server string, domain string) ([]byte, uint32, error) {
 		return []byte{}, 0, err
 	}
 	if len(respMsg.Answer) > 0 {
+		targetDomain := domain
+
 		for _, answer := range respMsg.Answer {
-			if https, ok := answer.(*dns.HTTPS); ok && https.Hdr.Name == dns.Fqdn(domain) {
+			if cname, ok := answer.(*dns.CNAME); ok && cname.Hdr.Name == dns.Fqdn(domain) {
+				targetDomain = cname.Target
+				break
+			}
+		}
+
+		for _, answer := range respMsg.Answer {
+			if https, ok := answer.(*dns.HTTPS); ok && https.Hdr.Name == dns.Fqdn(targetDomain) {
 				for _, v := range https.Value {
 					if echConfig, ok := v.(*dns.SVCBECHConfig); ok {
 						newError(context.Background(), "Get ECH config:", echConfig.String(), " TTL:", respMsg.Answer[0].Header().Ttl).AtDebug().WriteToLog()
