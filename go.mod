@@ -95,3 +95,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f // indirect
 	nhooyr.io/websocket v1.8.6 // indirect
 )
+replace github.com/v2fly/v2ray-core/v5 => github.com/ghxhy/v2ray-core/v5 v5.30.0.1
+
